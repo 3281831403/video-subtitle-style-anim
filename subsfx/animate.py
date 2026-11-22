@@ -1,9 +1,5 @@
 """Deterministic pop-in animation primitives for styled subtitles.
 
-Every public function below is an intentional stub: it raises
-``NotImplementedError`` so that the acceptance suite starts red.  Implement the
-functions without changing their signatures.
-
 Conventions
 -----------
 * All times are milliseconds; all geometry is in pixels.
@@ -13,6 +9,42 @@ Conventions
   tolerance of ``1e-9``.
 * Only the Python standard library (``math``) and pytest may be used.
 """
+
+# Width is one ``font_size`` unit: CJK Unified Ideographs (including Extension
+# A), kana, Hangul syllables and full-width punctuation.  Each tuple is an
+# inclusive ``(lo, hi)`` Unicode code-point range.
+_CJK_RANGES = (
+    (0x1100, 0x115F),      # Hangul Jamo
+    (0x2E80, 0x2EFF),      # CJK Radicals Supplement / Kangxi Radicals
+    (0x2F80, 0x2FA1),      # CJK Compatibility Ideographs
+    (0x3000, 0x303F),      # CJK Symbols and Punctuation (full-width)
+    (0x3040, 0x309F),      # Hiragana
+    (0x30A0, 0x30FF),      # Katakana
+    (0x3100, 0x312F),      # Bopomofo
+    (0x3130, 0x318F),      # Hangul Compatibility Jamo
+    (0x31F0, 0x31FF),      # Katakana Phonetic Extensions
+    (0x3400, 0x4DBF),      # CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),      # CJK Unified Ideographs
+    (0xA960, 0xA97F),      # Hangul Jamo Extended-A
+    (0xAC00, 0xD7AF),      # Hangul Syllables
+    (0xD7B0, 0xD7FF),      # Hangul Jamo Extended-B
+    (0xF900, 0xFAFF),      # CJK Compatibility Ideographs
+    (0xFE30, 0xFE4F),      # CJK Compatibility Forms
+    (0xFF00, 0xFF60),      # Fullwidth ASCII variants and punctuation
+    (0xFFE0, 0xFFE6),      # Fullwidth signs
+    (0x20000, 0x2FA1F),    # CJK Extensions B-F and Compatibility Supplement
+)
+
+
+def _is_number(value) -> bool:
+    """Return ``True`` for real numbers (``bool`` is deliberately excluded)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_cjk(char: str) -> bool:
+    """Return whether ``char`` is a wide East Asian glyph."""
+    code = ord(char)
+    return any(lo <= code <= hi for lo, hi in _CJK_RANGES)
 
 
 def char_times(text: str, start_ms: float, per_char_ms: float) -> list[float]:
@@ -33,7 +65,9 @@ def char_times(text: str, start_ms: float, per_char_ms: float) -> list[float]:
     * Empty text returns ``[]``.  No rounding is allowed; adjacent gaps must be
       equal within the module tolerance of ``1e-9`` ms.
     """
-    raise NotImplementedError
+    if per_char_ms < 0:
+        raise ValueError("per_char_ms must be non-negative")
+    return [float(start_ms + i * per_char_ms) for i in range(len(text))]
 
 
 def ease_out_back(t: float, overshoot: float) -> float:
@@ -55,7 +89,23 @@ def ease_out_back(t: float, overshoot: float) -> float:
       interpolation; that removes the back/spring feel.
     * Results are compared with an absolute tolerance of ``1e-9``.
     """
-    raise NotImplementedError
+    # Exact endpoints, both for the clamp and to avoid floating-point residue.
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+
+    # Bound the overshoot so the back-swing can never push the curve negative.
+    s = max(0.0, min(2.0, overshoot))
+
+    # Standard cubic back-out in (t - 1) form:
+    #   f(t) = 1 + (s + 1)(t - 1)^3 + s(t - 1)^2
+    # f(0) = 1 - (s + 1) + s = 0 and f(1) = 1 exactly.  With s in [0, 2] the
+    # only interior extremum on [0, 1] is the overshoot maximum, so the curve
+    # is never negative; s = 0 degenerates to the monotone ease-out
+    # f(t) = 1 - (1 - t)^3.
+    p = t - 1.0
+    return 1.0 + (s + 1.0) * p * p * p + s * p * p
 
 
 def scale_at(
@@ -81,7 +131,14 @@ def scale_at(
     * Endpoint values and all comparisons use an absolute tolerance of
       ``1e-9``.
     """
-    raise NotImplementedError
+    if dur_ms <= 0:
+        raise ValueError("dur_ms must be greater than zero")
+    if now <= char_time:
+        return 0.0
+    if now >= char_time + dur_ms:
+        return 1.0
+    progress = (now - char_time) / dur_ms
+    return ease_out_back(progress, overshoot)
 
 
 def opacity_at(char_time: float, now: float, fade_ms: float) -> float:
@@ -99,7 +156,13 @@ def opacity_at(char_time: float, now: float, fade_ms: float) -> float:
       while the pop is still overshooting.
     * Results are compared with an absolute tolerance of ``1e-9``.
     """
-    raise NotImplementedError
+    if fade_ms < 0:
+        raise ValueError("fade_ms must be non-negative")
+    if now <= char_time:
+        return 0.0
+    if fade_ms == 0.0 or now >= char_time + fade_ms:
+        return 1.0
+    return (now - char_time) / fade_ms
 
 
 def layout_chars(text: str, style: dict) -> list[dict]:
@@ -133,7 +196,27 @@ def layout_chars(text: str, style: dict) -> list[dict]:
     * Empty text returns ``[]``.  A non-positive ``font_size`` raises
       ``ValueError``.
     """
-    raise NotImplementedError
+    font_size = style["font_size"]
+    if not _is_number(font_size) or font_size <= 0:
+        raise ValueError("font_size must be greater than zero")
+
+    letter_spacing = style.get("letter_spacing", 0.0)
+    cjk_ratio = style.get("cjk_ratio", 1.0)
+    latin_ratio = style.get("latin_ratio", 0.5)
+
+    cjk_width = font_size * cjk_ratio
+    latin_width = font_size * latin_ratio
+
+    items: list[dict] = []
+    x = 0.0
+    for index, char in enumerate(text):
+        width = cjk_width if _is_cjk(char) else latin_width
+        items.append(
+            {"char": char, "index": index, "x": float(x), "width": float(width)}
+        )
+        # Spacing is only inserted *between* glyphs, never after the last.
+        x += width + letter_spacing
+    return items
 
 
 def stroke_width_at(scale: float, base_width: float) -> float:
@@ -149,7 +232,9 @@ def stroke_width_at(scale: float, base_width: float) -> float:
     * The returned value matches ``base_width`` to an absolute tolerance of
       ``1e-9``.
     """
-    raise NotImplementedError
+    if base_width < 0:
+        return 0.0
+    return float(base_width)
 
 
 def validate_style(style: dict) -> list[str]:
@@ -189,7 +274,61 @@ def validate_style(style: dict) -> list[str]:
     * Report each failing rule once; do not emit duplicate messages.  Unknown
       extra keys are ignored.  Do not mutate ``style``.
     """
-    raise NotImplementedError
+    errors: list[str] = []
+
+    # Presence/type checks come first, in the documented required-field order.
+    values: dict[str, object] = {}
+    for name in (
+        "font_size",
+        "per_char_ms",
+        "char_dur_ms",
+        "fade_ms",
+        "overshoot",
+    ):
+        value = style.get(name)
+        if not _is_number(value):
+            errors.append(f"{name} is required and must be a number")
+        else:
+            values[name] = value
+
+    font_size = values.get("font_size")
+    per_char_ms = values.get("per_char_ms")
+    char_dur_ms = values.get("char_dur_ms")
+    fade_ms = values.get("fade_ms")
+    overshoot = values.get("overshoot")
+
+    # Rule checks in the exact message order documented above.
+    if font_size is not None and font_size <= 0:
+        errors.append("font_size must be > 0")
+    if per_char_ms is not None and per_char_ms < 0:
+        errors.append("per_char_ms must be >= 0")
+    if char_dur_ms is not None and char_dur_ms <= 0:
+        errors.append("char_dur_ms must be > 0")
+    if fade_ms is not None and fade_ms < 0:
+        errors.append("fade_ms must be >= 0")
+    if per_char_ms is not None and char_dur_ms is not None:
+        if per_char_ms > char_dur_ms:
+            errors.append("per_char_ms must be <= char_dur_ms")
+    if fade_ms is not None and char_dur_ms is not None:
+        if fade_ms > char_dur_ms:
+            errors.append("fade_ms must be <= char_dur_ms")
+    if overshoot is not None and not (0.0 <= overshoot <= 2.0):
+        errors.append("overshoot must be in [0, 2]")
+
+    # Optional fields: only check the rule when a numeric value is present.
+    letter_spacing = style.get("letter_spacing")
+    if _is_number(letter_spacing) and letter_spacing < 0:
+        errors.append("letter_spacing must be >= 0")
+
+    cjk_ratio = style.get("cjk_ratio")
+    if _is_number(cjk_ratio) and cjk_ratio <= 0:
+        errors.append("cjk_ratio must be > 0")
+
+    latin_ratio = style.get("latin_ratio")
+    if _is_number(latin_ratio) and latin_ratio <= 0:
+        errors.append("latin_ratio must be > 0")
+
+    return errors
 
 
 def anim_batch(clips: list[dict], config: dict) -> dict:
@@ -234,4 +373,54 @@ def anim_batch(clips: list[dict], config: dict) -> dict:
       when a clip id is missing, empty or duplicated.  Do not mutate ``clips``
       or ``config``.  An empty batch returns ``{}``.
     """
-    raise NotImplementedError
+    style_errors = validate_style(config)
+    if style_errors:
+        raise ValueError("invalid style config: " + "; ".join(style_errors))
+
+    per_char_ms = config["per_char_ms"]
+    char_dur_ms = config["char_dur_ms"]
+
+    result: dict = {}
+    seen_ids: set = set()
+    for clip in clips:
+        clip_id = clip.get("id")
+        if not isinstance(clip_id, str) or not clip_id:
+            raise ValueError("clip id is missing or empty")
+        if clip_id in seen_ids:
+            raise ValueError(f"duplicate clip id: {clip_id}")
+        seen_ids.add(clip_id)
+
+        text = clip["text"]
+        start_ms = float(clip["start_ms"])
+        length = len(text)
+
+        # Each clip rebuilds its own timeline from its own start_ms; nothing is
+        # carried over from the previous clip.
+        times = char_times(text, start_ms, per_char_ms)
+        layout = layout_chars(text, config)
+
+        chars = [
+            {
+                "char": item["char"],
+                "index": item["index"],
+                "time_ms": times[item["index"]],
+                "x": item["x"],
+                "width": item["width"],
+            }
+            for item in layout
+        ]
+
+        timeline_end_ms = float(start_ms + per_char_ms * length)
+        end_ms = float(
+            start_ms + per_char_ms * max(0, length - 1) + char_dur_ms
+        )
+
+        result[clip_id] = {
+            "id": clip_id,
+            "start_ms": start_ms,
+            "timeline_end_ms": timeline_end_ms,
+            "end_ms": end_ms,
+            "chars": chars,
+        }
+
+    return result
